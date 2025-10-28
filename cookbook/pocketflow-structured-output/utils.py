@@ -8,7 +8,3 @@ def call_llm(prompt):
         messages=[{"role": "user", "content": prompt}]
     )
     return r.choices[0].message.content
-
-# Example usage
-if __name__ == "__main__":
-    print(call_llm("Tell me a short joke")) 

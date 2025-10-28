@@ -66,6 +66,9 @@ skill_indexes:
 
 Generate the YAML output now:
 """
+        print('='*192, 'PROMPT_START', '='*192, sep='\n')
+        print(prompt)
+        print('='*192, 'PROMPT_END', '='*192, sep='\n')
         response = call_llm(prompt)
 
         # --- Minimal YAML Extraction ---
@@ -102,47 +105,40 @@ Generate the YAML output now:
 
 
 # === Main Execution Logic ===
-if __name__ == "__main__":
-    print("=== Resume Parser - Structured Output with Indexes & Comments ===\n")
+print("=== Resume Parser - Structured Output with Indexes & Comments ===\n")
+# --- Configuration ---
+target_skills_to_find = [
+    "Team leadership & management", # 0
+    "CRM software",                 # 1
+    "Project management",           # 2
+    "Public speaking",              # 3
+    "Microsoft Office",             # 4
+    "Python",                       # 5
+    "Data Analysis"                 # 6
+]
+with open('data.txt', 'r') as file: resume_text = file.read()
 
-    # --- Configuration ---
-    target_skills_to_find = [
-        "Team leadership & management", # 0
-        "CRM software",                 # 1
-        "Project management",           # 2
-        "Public speaking",              # 3
-        "Microsoft Office",             # 4
-        "Python",                       # 5
-        "Data Analysis"                 # 6
-    ]
-    resume_file = 'data.txt' # Assumes data.txt contains the resume
+# --- Prepare Shared State ---
+shared = {}
+shared["resume_text"] = resume_text 
+shared["target_skills"] = target_skills_to_find
 
-    # --- Prepare Shared State ---
-    shared = {}
-    try:
-        with open(resume_file, 'r') as file:
-            shared["resume_text"] = file.read()
-    except FileNotFoundError:
-        print(f"Error: Resume file '{resume_file}' not found.")
-        exit(1) # Exit if resume file is missing
+# --- Define and Run Flow ---
+parser_node = ResumeParserNode(max_retries=3, wait=10)
+flow = Flow(start=parser_node)
+flow.run(shared) # Execute the parsing node
 
-    shared["target_skills"] = target_skills_to_find
-
-    # --- Define and Run Flow ---
-    parser_node = ResumeParserNode(max_retries=3, wait=10)
-    flow = Flow(start=parser_node)
-    flow.run(shared) # Execute the parsing node
-
-    # --- Display Found Skills ---
-    if "structured_data" in shared and "skill_indexes" in shared["structured_data"]:
-         print("\n--- Found Target Skills (from Indexes) ---")
-         found_indexes = shared["structured_data"]["skill_indexes"]
-         if found_indexes: # Check if the list is not empty or None
-             for index in found_indexes:
-                 if 0 <= index < len(target_skills_to_find):
-                     print(f"- {target_skills_to_find[index]} (Index: {index})")
-                 else:
-                     print(f"- Warning: Found invalid skill index {index}")
-         else:
-             print("No target skills identified from the list.")
-         print("----------------------------------------\n")
+# --- Display Found Skills ---
+#for k, v in shared.items(): print(f'{k}:\t{v}')
+if "structured_data" in shared and "skill_indexes" in shared["structured_data"]:
+        print("\n--- Found Target Skills (from Indexes) ---")
+        found_indexes = shared["structured_data"]["skill_indexes"]
+        if found_indexes: # Check if the list is not empty or None
+            for index in found_indexes:
+                if 0 <= index < len(target_skills_to_find):
+                    print(f"- {target_skills_to_find[index]} (Index: {index})")
+                else:
+                    print(f"- Warning: Found invalid skill index {index}")
+        else:
+            print("No target skills identified from the list.")
+        print("----------------------------------------\n")
