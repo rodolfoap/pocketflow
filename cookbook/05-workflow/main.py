@@ -1,37 +1,24 @@
-from flow import create_article_flow
+import sys, json
+from pocketflow import Flow
+from nodes import GenerateOutline, WriteSimpleContent, ApplyStyle
+
+def create_article_flow():
+    outline_node = GenerateOutline()
+    write_node = WriteSimpleContent()
+    style_node = ApplyStyle()
+    outline_node >> write_node >> style_node
+    flow = Flow(start=outline_node)
+    return flow
 
 def run_flow(topic="AI Safety"):
-    """
-    Run the article writing workflow with a specific topic
-    
-    Args:
-        topic (str): The topic for the article
-    """
-    # Initialize shared data with the topic
     shared = {"topic": topic}
-    
-    # Print starting message
     print(f"\n=== Starting Article Workflow on Topic: {topic} ===\n")
-    
     # Run the flow
     flow = create_article_flow()
     flow.run(shared)
-    
-    # Output summary
-    print("\n=== Workflow Completed ===\n")
-    print(f"Topic: {shared['topic']}")
-    print(f"Outline Length: {len(shared['outline'])} characters")
-    print(f"Draft Length: {len(shared['draft'])} characters")
-    print(f"Final Article Length: {len(shared['final_article'])} characters")
-    
+    print(json.dumps(shared, indent=8))
     return shared
 
-if __name__ == "__main__":
-    import sys
-    
-    # Get topic from command line if provided
-    topic = "AI Safety"  # Default topic
-    if len(sys.argv) > 1:
-        topic = " ".join(sys.argv[1:])
-    
-    run_flow(topic)
+topic = "AI Safety"  # Default topic
+if len(sys.argv) > 1: topic = " ".join(sys.argv[1:])
+run_flow(topic)
