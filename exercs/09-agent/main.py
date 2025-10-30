@@ -1,8 +1,9 @@
-from pocketflow import Flow, Node
+from pocketflow import AsyncFlow, AsyncNode, AsyncParallelBatchNode
 from tools_llm import call_llm
 from tools_websearch import websearch
 from tools_debug import debug
 import yaml
+import asyncio
 
 # Load agent configurations
 def load_agent_config(agent_name):
@@ -21,12 +22,12 @@ AGENTS = {
 	'secretary': load_agent_config('secretary')
 }
 
-class GetUserInput(Node):
+class GetUserInput(AsyncNode):
 	"""Get initial user message and assign to first agent"""
-	def exec(self, prep_res):
+	async def exec_async(self, prep_res):
 		return input("\n[User] Message: ")
 
-	def post(self, shared, prep_res, exec_res):
+	async def post_async(self, shared, prep_res, exec_res):
 		shared["initial_message"] = exec_res
 		shared["current_task"] = exec_res
 		shared["current_agent"] = "secretary"  # Start with secretary
@@ -34,22 +35,23 @@ class GetUserInput(Node):
 		shared["final_answer"] = None
 		shared["max_hops"] = 15
 		shared["current_hop"] = 0
+		shared["requester_agent"] = None  # Track who requested broadcast
 		return "default"
 
-class AgentDecisionNode(Node):
-	"""Agent decides: search web, call LLM, ask colleague, or answer"""
+class AgentDecisionNode(AsyncNode):
+	"""Agent decides: search web, call LLM, broadcast to all, ask one colleague, or answer"""
 	def __init__(self, agent_name):
 		super().__init__(max_retries=2, wait=3)
 		self.agent_name = agent_name
 
-	def prep(self, shared):
+	async def prep_async(self, shared):
 		return {
 			'task': shared["current_task"],
 			'history': shared["conversation_history"],
 			'agent_config': AGENTS[self.agent_name]
 		}
 
-	def exec(self, prep_res):
+	async def exec_async(self, prep_res):
 		debug(f'[{self.agent_name.upper()}] Thinking...')
 
 		prompt = f"""{prep_res['agent_config']}
@@ -61,18 +63,24 @@ CURRENT TASK ASSIGNED TO YOU:
 {prep_res['task']}
 
 INSTRUCTIONS:
-Decide what action to take. You have 4 options:
+Decide what action to take. You have 5 options:
 1. search - Search the web for information
 2. llm - Write a prompt and query an LLM for analysis/generation
-3. colleague - Ask a colleague (cto, lead_developer, qa_lead, secretary) for help
-4. answer - Provide the final answer to complete the task
+3. broadcast - Ask ALL team members (in parallel) for their input/roles/status
+4. colleague - Ask ONE specific colleague (cto, lead_developer, qa_lead, secretary) for help
+5. answer - Provide the final answer to complete the task
+
+IMPORTANT:
+- Use 'broadcast' when you need information from ALL team members (e.g., "ask everyone for their roles")
+- Use 'colleague' when you need help from ONE specific person
 
 Respond ONLY with valid YAML in this exact format:
 ```yaml
-action: search|llm|colleague|answer
+action: search|llm|broadcast|colleague|answer
 reasoning: brief explanation of your decision
 query: the search query (if action=search)
 prompt: the LLM prompt (if action=llm)
+broadcast_message: what you're asking all team members (if action=broadcast)
 colleague: cto|lead_developer|qa_lead|secretary (if action=colleague)
 delegation_message: what you're asking the colleague (if action=colleague)
 answer: your final response (if action=answer)
@@ -87,7 +95,7 @@ answer: your final response (if action=answer)
 			return "No previous actions"
 		return "\n".join([f"- [{h['agent']}] {h['action']}: {h['summary']}" for h in history])
 
-	def post(self, shared, prep_res, exec_res):
+	async def post_async(self, shared, prep_res, exec_res):
 		action = exec_res['action']
 		shared["current_decision"] = exec_res
 
@@ -100,25 +108,27 @@ answer: your final response (if action=answer)
 		debug(f'[{self.agent_name.upper()}] Decision: {action} - {exec_res.get("reasoning", "")}')
 		return action
 
-class SearchWebNode(Node):
+class SearchWebNode(AsyncNode):
 	"""Perform web search"""
 	def __init__(self):
 		super().__init__(max_retries=2, wait=2)
 
-	def prep(self, shared):
+	async def prep_async(self, shared):
 		query = shared["current_decision"]["query"]
 		return query
 
-	def exec(self, query):
+	async def exec_async(self, query):
 		debug(f'Searching web for: {query}')
-		results = websearch(query, max_results=3, crawl=False)
+		# Run sync function in executor
+		loop = asyncio.get_event_loop()
+		results = await loop.run_in_executor(None, lambda: websearch(query, max_results=3, crawl=False))
 		return results
 
-	def exec_fallback(self, query, error):
+	async def exec_fallback_async(self, query, error):
 		debug(f'Web search failed: {error}')
 		return []
 
-	def post(self, shared, prep_res, exec_res):
+	async def post_async(self, shared, prep_res, exec_res):
 		agent = shared["current_agent"]
 		summary = f"Searched '{prep_res}', found {len(exec_res)} results"
 
@@ -137,20 +147,23 @@ class SearchWebNode(Node):
 		# Route back to current agent
 		return shared["current_agent"]
 
-class CallLLMNode(Node):
+class CallLLMNode(AsyncNode):
 	"""Call LLM with custom prompt"""
 	def __init__(self):
 		super().__init__(max_retries=2, wait=3)
 
-	def prep(self, shared):
+	async def prep_async(self, shared):
 		prompt = shared["current_decision"]["prompt"]
 		return prompt
 
-	def exec(self, prompt):
+	async def exec_async(self, prompt):
 		debug(f'Calling LLM...')
-		return call_llm(prompt)
+		# Run sync function in executor
+		loop = asyncio.get_event_loop()
+		result = await loop.run_in_executor(None, lambda: call_llm(prompt))
+		return result
 
-	def post(self, shared, prep_res, exec_res):
+	async def post_async(self, shared, prep_res, exec_res):
 		agent = shared["current_agent"]
 		summary = f"Called LLM, got response ({len(exec_res)} chars)"
 
@@ -167,12 +180,87 @@ class CallLLMNode(Node):
 		# Route back to current agent
 		return shared["current_agent"]
 
-class RouteToColleagueNode(Node):
-	"""Route task to a colleague"""
-	def exec(self, prep_res):
+class BroadcastToAllNode(AsyncParallelBatchNode):
+	"""Broadcast message to all team members in parallel"""
+	async def prep_async(self, shared):
+		broadcast_message = shared["current_decision"]["broadcast_message"]
+		requester = shared["current_agent"]
+
+		# Store who requested the broadcast
+		shared["requester_agent"] = requester
+
+		# Create tasks for all OTHER agents (not the requester)
+		agents = ['cto', 'lead_developer', 'qa_lead', 'secretary']
+		tasks = []
+		for agent in agents:
+			if agent != requester:  # Don't ask yourself
+				tasks.append({
+					'agent': agent,
+					'message': broadcast_message,
+					'agent_config': AGENTS[agent]
+				})
+
+		debug(f'[{requester.upper()}] Broadcasting to {len(tasks)} agents: {broadcast_message}')
+		return tasks
+
+	async def exec_async(self, task):
+		"""Each agent processes the broadcast request independently"""
+		agent_name = task['agent']
+		message = task['message']
+		agent_config = task['agent_config']
+
+		debug(f'[{agent_name.upper()}] Received broadcast, responding...')
+
+		prompt = f"""{agent_config}
+
+You have received a request from a colleague:
+{message}
+
+Respond briefly and directly to this request. Be concise.
+"""
+
+		# Run sync function in executor
+		loop = asyncio.get_event_loop()
+		response = await loop.run_in_executor(None, lambda: call_llm(prompt))
+
+		return {
+			'agent': agent_name,
+			'response': response
+		}
+
+	async def post_async(self, shared, prep_res, exec_res_list):
+		"""Compile all responses and return to requester"""
+		requester = shared["requester_agent"]
+
+		# Log the broadcast action
+		shared["conversation_history"].append({
+			'agent': requester,
+			'action': 'broadcast',
+			'summary': f"Broadcast to {len(exec_res_list)} team members",
+			'data': exec_res_list
+		})
+
+		# Compile responses
+		responses_text = "\n\n".join([
+			f"[{r['agent'].upper()}] Response:\n{r['response']}"
+			for r in exec_res_list
+		])
+
+		# Update task with all responses
+		shared["current_task"] = f"Broadcast responses received:\n\n{responses_text}\n\nOriginal request: {shared['initial_message']}"
+		shared["current_agent"] = requester
+
+		debug(f'All broadcast responses collected, returning to {requester}')
+
+		# Route back to the requester
+		return requester
+
+class RouteToColleagueNode(AsyncNode):
+	"""Route task to ONE specific colleague"""
+	async def exec_async(self, prep_res):
 		return None
 
-	def post(self, shared, prep_res, exec_res):
+	async def post_async(self, shared, prep_res, exec_res):
 		decision = shared["current_decision"]
 		colleague = decision["colleague"]
 		message = decision["delegation_message"]
@@ -193,15 +281,15 @@ class RouteToColleagueNode(Node):
 
 		return colleague
 
-class FinalAnswerNode(Node):
+class FinalAnswerNode(AsyncNode):
 	"""Extract and display final answer"""
-	def prep(self, shared):
+	async def prep_async(self, shared):
 		return shared["current_decision"].get("answer", "No answer provided")
 
-	def exec(self, answer):
+	async def exec_async(self, answer):
 		return answer
 
-	def post(self, shared, prep_res, exec_res):
+	async def post_async(self, shared, prep_res, exec_res):
 		shared["final_answer"] = exec_res
 		agent = shared["current_agent"]
 
@@ -215,12 +303,12 @@ class FinalAnswerNode(Node):
 		debug(f'[{agent.upper()}] Final answer provided')
 		return "done"
 
-class DisplayResult(Node):
+class DisplayResult(AsyncNode):
 	"""Display the final result"""
-	def exec(self, prep_res):
+	async def exec_async(self, prep_res):
 		return None
 
-	def post(self, shared, prep_res, exec_res):
+	async def post_async(self, shared, prep_res, exec_res):
 		print("\n" + "="*60)
 		print("FINAL ANSWER:")
 		print("="*60)
@@ -245,6 +333,7 @@ sec_decide = AgentDecisionNode('secretary')
 # Action nodes (shared by all agents)
 search_web = SearchWebNode()
 call_llm_node = CallLLMNode()
+broadcast = BroadcastToAllNode()
 route = RouteToColleagueNode()
 final_answer = FinalAnswerNode()
 display = DisplayResult()
@@ -256,24 +345,28 @@ get_input >> sec_decide
 # Secretary decisions
 sec_decide - "search" >> search_web
 sec_decide - "llm" >> call_llm_node
+sec_decide - "broadcast" >> broadcast
 sec_decide - "colleague" >> route
 sec_decide - "answer" >> final_answer
 
 # CTO decisions
 cto_decide - "search" >> search_web
 cto_decide - "llm" >> call_llm_node
+cto_decide - "broadcast" >> broadcast
 cto_decide - "colleague" >> route
 cto_decide - "answer" >> final_answer
 
 # Lead Developer decisions
 dev_decide - "search" >> search_web
 dev_decide - "llm" >> call_llm_node
+dev_decide - "broadcast" >> broadcast
 dev_decide - "colleague" >> route
 dev_decide - "answer" >> final_answer
 
 # QA Lead decisions
 qa_decide - "search" >> search_web
 qa_decide - "llm" >> call_llm_node
+qa_decide - "broadcast" >> broadcast
 qa_decide - "colleague" >> route
 qa_decide - "answer" >> final_answer
 
@@ -288,6 +381,12 @@ call_llm_node - "cto" >> cto_decide
 call_llm_node - "lead_developer" >> dev_decide
 call_llm_node - "qa_lead" >> qa_decide
 
+# Broadcast can return to any agent
+broadcast - "secretary" >> sec_decide
+broadcast - "cto" >> cto_decide
+broadcast - "lead_developer" >> dev_decide
+broadcast - "qa_lead" >> qa_decide
+
 # Routing to colleagues
 route - "cto" >> cto_decide
 route - "lead_developer" >> dev_decide
@@ -297,7 +396,11 @@ route - "secretary" >> sec_decide
 # Final answer leads to display
 final_answer - "done" >> display
 
-# Create and run flow
-flow = Flow(start=get_input)
-shared = {}
-flow.run(shared)
+# Create and run async flow
+async def main():
+	flow = AsyncFlow(start=get_input)
+	shared = {}
+	await flow.run_async(shared)
+
+if __name__ == "__main__":
+	asyncio.run(main())
