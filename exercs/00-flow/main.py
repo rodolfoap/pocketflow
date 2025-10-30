@@ -4,7 +4,6 @@ from tools_websearch import websearch
 from tools_debug import debug
 
 class GetUserInput(Node):
-	"""Get user input and store in shared"""
 	def prep(self, shared):
 		return None
 
@@ -16,7 +15,6 @@ class GetUserInput(Node):
 		return "default"
 
 class SearchWeb(Node):
-	"""Search the web and crawl pages with retry mechanism"""
 	def __init__(self):
 		super().__init__(max_retries=3, wait=2)
 
@@ -28,17 +26,14 @@ class SearchWeb(Node):
 		return websearch(query, crawl=True)
 
 	def post(self, shared, prep_res, exec_res):
-		# Optimized string concatenation using list join
 		shared["search_results"] = "\n\n".join(item["text"] for item in exec_res)
 		return "default"
 
 class Summarize(Node):
-	"""Summarize search results using LLM with retry mechanism"""
 	def __init__(self):
 		super().__init__(max_retries=3, wait=5)
 
 	def prep(self, shared):
-		# Return both query and search results as tuple
 		return shared["query"], shared["search_results"]
 
 	def exec(self, prep_res):
