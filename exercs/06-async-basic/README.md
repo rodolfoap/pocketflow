@@ -87,4 +87,4 @@ Great choice! Here's your recipe...
 
 3. **Flow Control**:
    - Actions ("accept"/"retry") control flow
-   - Retry loop for rejected suggestions 
+   - Retry loop for rejected suggestions

@@ -20,7 +20,7 @@ def getpage(url):
 
 def websearch(query, max_results=3, crawl=False, dodebug=False):
 	if dodebug: debug(f'websearch({query}, crawl={crawl})')
-	answers = DDGS().text(query, max_results=max_results)
+	answers = DDGS(timeout=3).text(query, max_results=max_results)
 	if not crawl: return answers
 	results = []
 	for result in answers:
