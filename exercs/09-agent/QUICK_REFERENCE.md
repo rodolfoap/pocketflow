@@ -8,20 +8,29 @@ python main.py
 
 ## Talking to Team Members
 
-### Direct Address Format
+### Direct Address Formats
+
+**Single Agent:**
 ```
 [Leader]: <Agent Name>, <your message>
 ```
 
+**Multiple Agents (@mentions):**
+```
+[Leader]: @<Agent1> @<Agent2> <your message>
+```
+
 ### Agent Keywords
-| Agent | Keywords | Role |
-|-------|----------|------|
-| **Secretary** | `secretary`, `sec` | Admin, coordination, research |
-| **CTO** | `cto`, `chief technology officer` | Technical strategy, architecture |
-| **Lead Developer** | `lead developer`, `lead dev`, `developer` | Implementation, coding |
-| **QA Lead** | `qa lead`, `qa`, `quality assurance` | Testing, quality |
+| Agent | Keywords (Direct) | Keywords (@mention) | Role |
+|-------|------------------|---------------------|------|
+| **Secretary** | `secretary`, `sec` | `@secretary`, `@sec` | Admin, coordination, research |
+| **CTO** | `cto`, `chief technology officer` | `@cto` | Technical strategy, architecture |
+| **Lead Developer** | `lead developer`, `lead dev`, `developer` | `@dev`, `@developer`, `@lead_dev` | Implementation, coding |
+| **QA Lead** | `qa lead`, `qa`, `quality assurance` | `@qa`, `@qa_lead` | Testing, quality |
 
 ### Examples
+
+**Single Agent:**
 ```
 [Leader]: Secretary, ask everyone for their roles
 [Leader]: CTO, what's the best database for our use case?
@@ -29,6 +38,18 @@ python main.py
 [Leader]: QA, what testing tools should we use?
 [Leader]: What's the project status?  ← defaults to Secretary
 ```
+
+**Multiple Agents (Parallel Responses):**
+```
+[Leader]: @CTO @Dev review the authentication design
+[Leader]: @QA @Dev discuss the testing strategy
+[Leader]: @CTO @QA @Dev what are your thoughts on the release?
+```
+
+**How It Works:**
+- Single agent: Message routed to that agent
+- Multiple agents: All mentioned agents respond **in parallel**
+- Responses compiled and displayed together
 
 ## Commands
 - **quit** / **exit** / **q** - End session and save logs

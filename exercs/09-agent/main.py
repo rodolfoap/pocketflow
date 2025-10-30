@@ -63,10 +63,39 @@ class GetUserInput(AsyncNode):
 		return user_input
 
 	def _parse_agent_mention(self, message):
-		"""Parse message to detect if a specific agent is mentioned"""
+		"""Parse message to detect single or multiple agents mentioned"""
+		import re
+
 		message_lower = message.lower()
 
-		# Check for direct mentions at the start
+		# Check for @mentions (e.g., "@CTO @Lead_Dev, review this")
+		at_mentions = re.findall(r'@(\w+)', message)
+		if at_mentions:
+			# Map @mentions to agent names
+			mention_map = {
+				'secretary': 'secretary', 'sec': 'secretary',
+				'cto': 'cto',
+				'lead_developer': 'lead_developer', 'lead_dev': 'lead_developer', 'developer': 'lead_developer', 'dev': 'lead_developer',
+				'qa_lead': 'qa_lead', 'qa': 'qa_lead', 'quality_assurance': 'qa_lead'
+			}
+
+			target_agents = []
+			for mention in at_mentions:
+				mention_lower = mention.lower()
+				if mention_lower in mention_map:
+					agent = mention_map[mention_lower]
+					if agent not in target_agents:
+						target_agents.append(agent)
+
+			if target_agents:
+				# Remove all @mentions from message
+				clean_message = re.sub(r'@\w+[,\s]*', '', message).strip()
+				if len(target_agents) > 1:
+					return ('multi_agent', target_agents), clean_message
+				else:
+					return (target_agents[0], None), clean_message
+
+		# Check for direct mentions at the start (single agent)
 		agent_keywords = {
 			'secretary': ['secretary', 'sec'],
 			'cto': ['cto', 'chief technology officer'],
@@ -80,25 +109,18 @@ class GetUserInput(AsyncNode):
 				if message_lower.startswith(keyword):
 					# Remove the agent mention from the message
 					clean_message = message[len(keyword):].lstrip(',:; ')
-					return agent, clean_message if clean_message else message
+					return (agent, None), clean_message if clean_message else message
 
 		# Default to secretary if no specific agent mentioned
-		return 'secretary', message
+		return ('secretary', None), message
 
 	async def post_async(self, shared, prep_res, exec_res):
 		if exec_res.lower() in ['quit', 'exit', 'q']:
 			shared["should_quit"] = True
 			return "quit"
 
-		# Parse which agent should handle this
-		target_agent, cleaned_message = self._parse_agent_mention(exec_res)
-
-		# Log user input
-		log_message('user_input', 'user', f"To {target_agent}: {exec_res}")
-
-		shared["initial_message"] = cleaned_message
-		shared["current_task"] = cleaned_message
-		shared["current_agent"] = target_agent  # Route to specified agent
+		# Parse which agent(s) should handle this
+		(routing_type, target_list), cleaned_message = self._parse_agent_mention(exec_res)
 
 		# Reset per-interaction state but keep memory
 		if not shared.get("is_continuation"):
@@ -111,10 +133,29 @@ class GetUserInput(AsyncNode):
 		shared["max_hops"] = 15
 		shared["current_hop"] = 0
 		shared["requester_agent"] = None
+		shared["initial_message"] = cleaned_message
+		shared["current_task"] = cleaned_message
 
-		debug(f'Routing message to: {target_agent.upper()}')
+		# Handle multi-agent or single agent routing
+		if routing_type == 'multi_agent':
+			# Store target agents for TargetedBroadcastNode
+			shared["target_agents"] = target_list
+			shared["current_agent"] = "user"  # User is the requester
+			shared["requester_agent"] = "user"
 
-		return target_agent
+			log_message('user_input', 'user', f"To {', '.join(target_list)}: {exec_res}")
+			debug(f'Routing message to multiple agents: {", ".join([a.upper() for a in target_list])}')
+
+			return "multi_agent"
+		else:
+			# Single agent routing
+			target_agent = routing_type
+			shared["current_agent"] = target_agent
+
+			log_message('user_input', 'user', f"To {target_agent}: {exec_res}")
+			debug(f'Routing message to: {target_agent.upper()}')
+
+			return target_agent
 
 class AgentDecisionNode(AsyncNode):
 	"""Agent decides: search web, call LLM, broadcast to all, ask one colleague, or answer"""
@@ -299,6 +340,82 @@ class CallLLMNode(AsyncNode):
 		# Route back to current agent
 		return shared["current_agent"]
 
+class TargetedBroadcastNode(AsyncParallelBatchNode):
+	"""Broadcast message to SELECTED team members in parallel"""
+	async def prep_async(self, shared):
+		message = shared["current_task"]
+		target_agents = shared["target_agents"]
+		requester = shared.get("requester_agent", "user")
+
+		# Store who requested the broadcast
+		shared["requester_agent"] = requester
+
+		# Create tasks for specified agents only
+		tasks = []
+		for agent in target_agents:
+			tasks.append({
+				'agent': agent,
+				'message': message,
+				'agent_config': AGENTS[agent]
+			})
+
+		debug(f'[USER] Targeted broadcast to {len(tasks)} agents: {message}')
+		return tasks
+
+	async def exec_async(self, task):
+		"""Each agent processes the broadcast request independently"""
+		agent_name = task['agent']
+		message = task['message']
+		agent_config = task['agent_config']
+
+		debug(f'[{agent_name.upper()}] Received targeted broadcast, responding...')
+
+		prompt = f"""{agent_config}
+
+You have received a direct request from the Leader:
+{message}
+
+Respond directly and concisely to this request.
+"""
+
+		# Run sync function in executor
+		loop = asyncio.get_event_loop()
+		response = await loop.run_in_executor(None, lambda: call_llm(prompt))
+
+		return {
+			'agent': agent_name,
+			'response': response
+		}
+
+	async def post_async(self, shared, prep_res, exec_res_list):
+		"""Compile all responses and display to user"""
+		# Log targeted broadcast and all responses
+		log_message('targeted_broadcast', 'user', f"To {len(exec_res_list)} agents")
+		for response in exec_res_list:
+			log_message('targeted_broadcast_response', response['agent'], response['response'][:200])
+
+		# Log the broadcast action
+		shared["conversation_history"].append({
+			'agent': 'user',
+			'action': 'targeted_broadcast',
+			'summary': f"Targeted broadcast to {len(exec_res_list)} team members",
+			'data': exec_res_list
+		})
+
+		# Compile responses
+		responses_text = "\n\n".join([
+			f"[{r['agent'].upper()}] Response:\n{r['response']}"
+			for r in exec_res_list
+		])
+
+		# Set final answer directly (no further agent processing needed)
+		shared["final_answer"] = f"Responses from {len(exec_res_list)} team members:\n\n{responses_text}"
+
+		debug(f'All targeted broadcast responses collected')
+
+		# Go directly to display
+		return "done"
+
 class BroadcastToAllNode(AsyncParallelBatchNode):
 	"""Broadcast message to all team members in parallel"""
 	async def prep_async(self, shared):
@@ -481,16 +598,18 @@ sec_decide = AgentDecisionNode('secretary')
 search_web = SearchWebNode()
 call_llm_node = CallLLMNode()
 broadcast = BroadcastToAllNode()
+targeted_broadcast = TargetedBroadcastNode()
 route = RouteToColleagueNode()
 final_answer = FinalAnswerNode()
 display = DisplayResult()
 
 # Wire up the flow
-# Start with user input - can route to any agent
+# Start with user input - can route to any agent or multi-agent
 get_input - "secretary" >> sec_decide
 get_input - "cto" >> cto_decide
 get_input - "lead_developer" >> dev_decide
 get_input - "qa_lead" >> qa_decide
+get_input - "multi_agent" >> targeted_broadcast
 get_input - "quit" >> quit_node
 
 # Secretary decisions
@@ -547,6 +666,9 @@ route - "secretary" >> sec_decide
 # Final answer leads to display, then loops back to input
 final_answer - "done" >> display
 display - "continue" >> get_input
+
+# Targeted broadcast goes directly to display (already compiled answer)
+targeted_broadcast - "done" >> display
 
 # Create and run async flow
 async def main():
