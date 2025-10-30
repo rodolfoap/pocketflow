@@ -122,11 +122,10 @@ class GetUserInput(AsyncNode):
 		# Parse which agent(s) should handle this
 		(routing_type, target_list), cleaned_message = self._parse_agent_mention(exec_res)
 
-		# Reset per-interaction state but keep memory
-		if not shared.get("is_continuation"):
-			# First interaction - load all past history
-			shared["past_conversations"] = load_conversation_history()
-			shared["is_continuation"] = True
+		# Reload past conversations EVERY TIME to include latest interactions
+		shared["past_conversations"] = load_conversation_history()
+		shared["is_continuation"] = True
+		debug(f'Loaded {len(shared["past_conversations"])} past conversation entries')
 
 		shared["conversation_history"] = []  # Current interaction only
 		shared["final_answer"] = None
@@ -177,6 +176,12 @@ class AgentDecisionNode(AsyncNode):
 		# Format past conversations for context
 		past_memory = self._format_past_conversations(prep_res['past_conversations'])
 
+		# DEBUG: Check what memory we have
+		debug(f'Past conversations count: {len(prep_res["past_conversations"])}')
+		debug(f'Formatted memory length: {len(past_memory)} chars')
+		if len(past_memory) < 100:
+			debug(f'Memory content: {past_memory}')
+
 		prompt = f"""{prep_res['agent_config']}
 
 PAST CONVERSATIONS (Your Memory):
@@ -222,25 +227,65 @@ answer: your final response (if action=answer)
 		return "\n".join([f"- [{h['agent']}] {h['action']}: {h['summary']}" for h in history])
 
 	def _format_past_conversations(self, past_logs):
-		"""Format past conversation logs for agent memory"""
+		"""Format past conversation logs for agent memory - conversation style"""
 		if not past_logs:
 			return "No past conversations"
 
-		# Group by relevant interactions, show last 20 entries
-		recent_logs = past_logs[-20:] if len(past_logs) > 20 else past_logs
+		# Show last 30 entries to capture recent context
+		recent_logs = past_logs[-30:] if len(past_logs) > 30 else past_logs
 
+		# Build conversation-style memory
 		formatted = []
+		current_conversation = []
+
 		for log in recent_logs:
-			timestamp = log.get('timestamp', 'unknown')
 			log_type = log.get('type', 'unknown')
 			agent = log.get('agent', 'unknown')
 			content = log.get('content', '')
+			timestamp = log.get('timestamp', '')[:19]
 
-			# Truncate long content
-			if len(content) > 200:
-				content = content[:200] + "..."
+			# Structure memory to show actual conversations
+			if log_type == 'user_input':
+				# User said something - extract the actual message
+				# Content is like "To cto: CTO, My name is James Conway."
+				# We want just "My name is James Conway."
+				message = content
+				if content.startswith('To '):
+					# Remove "To <agent>: " prefix
+					if ': ' in content:
+						# Split once on first ': '
+						prefix, rest = content.split(': ', 1)
+						# rest is "CTO, My name is James Conway."
+						# Remove agent name if it's repeated
+						# Check if rest starts with agent name followed by comma
+						for agent_keyword in ['CTO', 'Secretary', 'Lead Developer', 'Lead Dev', 'Developer', 'QA Lead', 'QA']:
+							if rest.startswith(agent_keyword):
+								# Remove agent name and following comma/space
+								message = rest[len(agent_keyword):].lstrip(', ')
+								break
+						else:
+							message = rest
 
-			formatted.append(f"[{timestamp[:19]}] {agent}: {log_type} - {content}")
+				formatted.append(f"\n[{timestamp}] Leader said: {message}")
+
+			elif log_type == 'final_answer':
+				# Agent responded
+				formatted.append(f"[{timestamp}] {agent.upper()} responded: {content[:300]}")
+
+			elif log_type == 'broadcast_response':
+				# Agent responded to broadcast
+				formatted.append(f"[{timestamp}] {agent.upper()} said: {content[:200]}")
+
+			elif log_type == 'search':
+				# Agent searched web
+				formatted.append(f"[{timestamp}] {agent.upper()} searched: {content}")
+
+			elif log_type == 'delegation':
+				# Agent delegated
+				formatted.append(f"[{timestamp}] {agent.upper()} delegated: {content}")
+
+		if not formatted:
+			return "No meaningful past conversations"
 
 		return "\n".join(formatted)
 
