@@ -62,17 +62,43 @@ class GetUserInput(AsyncNode):
 		user_input = input("\n[Leader]: ")
 		return user_input
 
+	def _parse_agent_mention(self, message):
+		"""Parse message to detect if a specific agent is mentioned"""
+		message_lower = message.lower()
+
+		# Check for direct mentions at the start
+		agent_keywords = {
+			'secretary': ['secretary', 'sec'],
+			'cto': ['cto', 'chief technology officer'],
+			'lead_developer': ['lead developer', 'lead dev', 'developer'],
+			'qa_lead': ['qa lead', 'qa', 'quality assurance']
+		}
+
+		for agent, keywords in agent_keywords.items():
+			for keyword in keywords:
+				# Check if message starts with agent name (with optional punctuation)
+				if message_lower.startswith(keyword):
+					# Remove the agent mention from the message
+					clean_message = message[len(keyword):].lstrip(',:; ')
+					return agent, clean_message if clean_message else message
+
+		# Default to secretary if no specific agent mentioned
+		return 'secretary', message
+
 	async def post_async(self, shared, prep_res, exec_res):
 		if exec_res.lower() in ['quit', 'exit', 'q']:
 			shared["should_quit"] = True
 			return "quit"
 
-		# Log user input
-		log_message('user_input', 'user', exec_res)
+		# Parse which agent should handle this
+		target_agent, cleaned_message = self._parse_agent_mention(exec_res)
 
-		shared["initial_message"] = exec_res
-		shared["current_task"] = exec_res
-		shared["current_agent"] = "secretary"  # Start with secretary
+		# Log user input
+		log_message('user_input', 'user', f"To {target_agent}: {exec_res}")
+
+		shared["initial_message"] = cleaned_message
+		shared["current_task"] = cleaned_message
+		shared["current_agent"] = target_agent  # Route to specified agent
 
 		# Reset per-interaction state but keep memory
 		if not shared.get("is_continuation"):
@@ -86,7 +112,9 @@ class GetUserInput(AsyncNode):
 		shared["current_hop"] = 0
 		shared["requester_agent"] = None
 
-		return "default"
+		debug(f'Routing message to: {target_agent.upper()}')
+
+		return target_agent
 
 class AgentDecisionNode(AsyncNode):
 	"""Agent decides: search web, call LLM, broadcast to all, ask one colleague, or answer"""
@@ -458,8 +486,11 @@ final_answer = FinalAnswerNode()
 display = DisplayResult()
 
 # Wire up the flow
-# Start with user input
-get_input >> sec_decide
+# Start with user input - can route to any agent
+get_input - "secretary" >> sec_decide
+get_input - "cto" >> cto_decide
+get_input - "lead_developer" >> dev_decide
+get_input - "qa_lead" >> qa_decide
 get_input - "quit" >> quit_node
 
 # Secretary decisions

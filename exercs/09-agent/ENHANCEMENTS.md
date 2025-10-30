@@ -47,7 +47,18 @@
   - `conversation_history` - Reset for each new interaction
   - `is_continuation` - Tracks if this is first or subsequent interaction
 
-### 4. **Enhanced Agent Prompts**
+### 4. **Direct Agent Communication**
+- **Agent Routing**: Start your message with an agent's name to direct it to them
+- **Smart Parsing**: System detects agent mentions and routes accordingly
+- **Default Routing**: Messages without an agent name go to Secretary by default
+- **Supported Keywords**:
+  - Secretary: `secretary`, `sec`
+  - CTO: `cto`, `chief technology officer`
+  - Lead Developer: `lead developer`, `lead dev`, `developer`
+  - QA Lead: `qa lead`, `qa`, `quality assurance`
+- **Message Cleaning**: Agent name is removed from the message before processing
+
+### 5. **Enhanced Agent Prompts**
 Agents now receive:
 - **Past Conversations** (Memory): Last 20 entries from all previous sessions
 - **Current Interaction History**: Steps taken in the current task
@@ -63,17 +74,41 @@ cd /app/exercs/09-agent
 python main.py
 ```
 
+### Addressing Team Members
+
+You can communicate with any team member directly by starting your message with their name/title:
+
+**Supported Agent Names**:
+- `Secretary` / `Sec` - Administrative tasks, coordination, research
+- `CTO` / `Chief Technology Officer` - Technical strategy, architecture
+- `Lead Developer` / `Lead Dev` / `Developer` - Implementation, coding
+- `QA Lead` / `QA` / `Quality Assurance` - Testing, quality assurance
+
+**Examples**:
+```
+[Leader]: Secretary, ask everyone for their roles
+[Leader]: CTO, what's the best architecture for microservices?
+[Leader]: Lead Developer, implement a REST API
+[Leader]: QA Lead, what testing framework should we use?
+[Leader]: What's our product roadmap?  (defaults to Secretary)
+```
+
+The agent name is parsed and removed from the message, so the agent receives just the task.
+
 ### Example Session
 ```
-[User] Message (or 'quit' to exit): Secretary, ask everyone for their roles
+[Leader]: Secretary, ask everyone for their roles
 [Secretary broadcasts to all agents...]
 [Agents respond in parallel...]
 [Secretary compiles and answers...]
 
-[User] Message (or 'quit' to exit): Who is the CTO again?
-[Secretary remembers from previous interaction and answers directly...]
+[Leader]: CTO, what does the Lead Developer do?
+[CTO remembers from previous broadcast and answers directly...]
 
-[User] Message (or 'quit' to exit): quit
+[Leader]: Lead Dev, hello!
+[Lead Developer responds...]
+
+[Leader]: quit
 Session ended. All conversations saved to conversation_log.jsonl
 ```
 
