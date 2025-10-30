@@ -18,13 +18,13 @@ def getpage(url):
 	for script in soup(["script", "style"]): script.extract()
 	return cleanup(soup.get_text())
 
-def websearch(query, max_results=3, crawl=False):
-	debug(f'call_llm({query})')
+def websearch(query, max_results=3, crawl=False, dodebug=False):
+	if dodebug: debug(f'websearch({query}, crawl={crawl})')
 	answers = DDGS().text(query, max_results=max_results)
 	if not crawl: return answers
-	s=[]
-	for r in answers:
-		# r has `title`, `body`, `href`, we add `text`
-		r['text']=getpage(r['href'])
-		s.append(r)
-	return s
+	results = []
+	for result in answers:
+		# result has `title`, `body`, `href`, we add `text`
+		result['text'] = getpage(result['href'])
+		results.append(result)
+	return results

@@ -1,39 +1,64 @@
 from pocketflow import Flow, Node
 from tools_llm import call_llm
 from tools_websearch import websearch
+from tools_debug import debug
 
-class SearchWeb(Node):
+class GetUserInput(Node):
+	"""Get user input and store in shared"""
 	def prep(self, shared):
-		shared["query"] = input("\nQuestion: ")
-		return shared["query"]
-
-	def exec(self, prep_res):
-		exec_res = websearch(prep_res, crawl=True)
-		return exec_res
-
-	def post(self, shared, prep_res, exec_res):
-		shared["response"] = ''
-		for item in exec_res: shared["response"]+=f'{item["text"]}\n\n'
 		return None
 
-class Summarize(Node):
+	def exec(self, prep_res):
+		return input("\nQuestion: ")
+
+	def post(self, shared, prep_res, exec_res):
+		shared["query"] = exec_res
+		return "default"
+
+class SearchWeb(Node):
+	"""Search the web and crawl pages with retry mechanism"""
+	def __init__(self):
+		super().__init__(max_retries=3, wait=2)
+
 	def prep(self, shared):
-		return shared["response"]
+		return shared["query"]
+
+	def exec(self, query):
+		debug('Web search...')
+		return websearch(query, crawl=True)
+
+	def post(self, shared, prep_res, exec_res):
+		# Optimized string concatenation using list join
+		shared["search_results"] = "\n\n".join(item["text"] for item in exec_res)
+		return "default"
+
+class Summarize(Node):
+	"""Summarize search results using LLM with retry mechanism"""
+	def __init__(self):
+		super().__init__(max_retries=3, wait=5)
+
+	def prep(self, shared):
+		# Return both query and search results as tuple
+		return shared["query"], shared["search_results"]
 
 	def exec(self, prep_res):
-		query=shared["query"]
-		prompt=f'Read the text below and answer in as much detail as possible: {query}\n---\n{prep_res}'
-		exec_res = call_llm(prompt)
-		return exec_res
+		debug('LLM synthesis...')
+		query, search_results = prep_res
+		prompt = f'Read the text below and answer in as much detail as possible: {query}\n---\n{search_results}'
+		return call_llm(prompt)
 
 	def post(self, shared, prep_res, exec_res):
 		shared["summary"] = exec_res
 		return "default"
 
-load_data = SearchWeb()
+
+get_input = GetUserInput()
+search = SearchWeb()
 summarize = Summarize()
-load_data >> summarize
-flow = Flow(start=load_data)
+get_input >> search >> summarize
+
+flow = Flow(start=get_input)
 shared = {}
 flow.run(shared)
+
 print(shared["summary"])
