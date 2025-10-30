@@ -4,6 +4,9 @@ from tools_websearch import websearch
 from tools_debug import debug
 import yaml
 import asyncio
+import json
+from datetime import datetime
+from pathlib import Path
 
 # Load agent configurations
 def load_agent_config(agent_name):
@@ -22,20 +25,67 @@ AGENTS = {
 	'secretary': load_agent_config('secretary')
 }
 
+# Logging system
+LOG_FILE = Path('conversation_log.jsonl')
+
+def log_message(message_type, agent, content, data=None):
+	"""Log a message exchange to the log file"""
+	log_entry = {
+		'timestamp': datetime.now().isoformat(),
+		'type': message_type,
+		'agent': agent,
+		'content': content,
+		'data': data
+	}
+	with open(LOG_FILE, 'a') as f:
+		f.write(json.dumps(log_entry) + '\n')
+
+def load_conversation_history():
+	"""Load all past conversation history from log file"""
+	if not LOG_FILE.exists():
+		return []
+
+	history = []
+	with open(LOG_FILE, 'r') as f:
+		for line in f:
+			if line.strip():
+				history.append(json.loads(line))
+	return history
+
 class GetUserInput(AsyncNode):
-	"""Get initial user message and assign to first agent"""
-	async def exec_async(self, prep_res):
-		return input("\n[User] Message: ")
+	"""Get user message and assign to first agent - can loop for multiple interactions"""
+	async def prep_async(self, shared):
+		# Check if this is first run or continuation
+		return shared.get("is_continuation", False)
+
+	async def exec_async(self, is_continuation):
+		user_input = input("\n[Leader]: ")
+		return user_input
 
 	async def post_async(self, shared, prep_res, exec_res):
+		if exec_res.lower() in ['quit', 'exit', 'q']:
+			shared["should_quit"] = True
+			return "quit"
+
+		# Log user input
+		log_message('user_input', 'user', exec_res)
+
 		shared["initial_message"] = exec_res
 		shared["current_task"] = exec_res
 		shared["current_agent"] = "secretary"  # Start with secretary
-		shared["conversation_history"] = []
+
+		# Reset per-interaction state but keep memory
+		if not shared.get("is_continuation"):
+			# First interaction - load all past history
+			shared["past_conversations"] = load_conversation_history()
+			shared["is_continuation"] = True
+
+		shared["conversation_history"] = []  # Current interaction only
 		shared["final_answer"] = None
 		shared["max_hops"] = 15
 		shared["current_hop"] = 0
-		shared["requester_agent"] = None  # Track who requested broadcast
+		shared["requester_agent"] = None
+
 		return "default"
 
 class AgentDecisionNode(AsyncNode):
@@ -48,15 +98,22 @@ class AgentDecisionNode(AsyncNode):
 		return {
 			'task': shared["current_task"],
 			'history': shared["conversation_history"],
+			'past_conversations': shared.get("past_conversations", []),
 			'agent_config': AGENTS[self.agent_name]
 		}
 
 	async def exec_async(self, prep_res):
 		debug(f'[{self.agent_name.upper()}] Thinking...')
 
+		# Format past conversations for context
+		past_memory = self._format_past_conversations(prep_res['past_conversations'])
+
 		prompt = f"""{prep_res['agent_config']}
 
-CONVERSATION HISTORY:
+PAST CONVERSATIONS (Your Memory):
+{past_memory}
+
+CURRENT INTERACTION HISTORY:
 {self._format_history(prep_res['history'])}
 
 CURRENT TASK ASSIGNED TO YOU:
@@ -92,12 +149,40 @@ answer: your final response (if action=answer)
 
 	def _format_history(self, history):
 		if not history:
-			return "No previous actions"
+			return "No previous actions in this interaction"
 		return "\n".join([f"- [{h['agent']}] {h['action']}: {h['summary']}" for h in history])
+
+	def _format_past_conversations(self, past_logs):
+		"""Format past conversation logs for agent memory"""
+		if not past_logs:
+			return "No past conversations"
+
+		# Group by relevant interactions, show last 20 entries
+		recent_logs = past_logs[-20:] if len(past_logs) > 20 else past_logs
+
+		formatted = []
+		for log in recent_logs:
+			timestamp = log.get('timestamp', 'unknown')
+			log_type = log.get('type', 'unknown')
+			agent = log.get('agent', 'unknown')
+			content = log.get('content', '')
+
+			# Truncate long content
+			if len(content) > 200:
+				content = content[:200] + "..."
+
+			formatted.append(f"[{timestamp[:19]}] {agent}: {log_type} - {content}")
+
+		return "\n".join(formatted)
 
 	async def post_async(self, shared, prep_res, exec_res):
 		action = exec_res['action']
 		shared["current_decision"] = exec_res
+
+		# Log the decision
+		log_message('decision', self.agent_name,
+		           f"Action: {action}, Reasoning: {exec_res.get('reasoning', 'N/A')}",
+		           exec_res)
 
 		# Check hop limit
 		shared["current_hop"] += 1
@@ -131,6 +216,9 @@ class SearchWebNode(AsyncNode):
 	async def post_async(self, shared, prep_res, exec_res):
 		agent = shared["current_agent"]
 		summary = f"Searched '{prep_res}', found {len(exec_res)} results"
+
+		# Log search
+		log_message('search', agent, f"Query: {prep_res}", {'results_count': len(exec_res)})
 
 		shared["conversation_history"].append({
 			'agent': agent,
@@ -166,6 +254,9 @@ class CallLLMNode(AsyncNode):
 	async def post_async(self, shared, prep_res, exec_res):
 		agent = shared["current_agent"]
 		summary = f"Called LLM, got response ({len(exec_res)} chars)"
+
+		# Log LLM call
+		log_message('llm_call', agent, f"Prompt length: {len(prep_res)} chars, Response length: {len(exec_res)} chars")
 
 		shared["conversation_history"].append({
 			'agent': agent,
@@ -232,6 +323,11 @@ Respond briefly and directly to this request. Be concise.
 		"""Compile all responses and return to requester"""
 		requester = shared["requester_agent"]
 
+		# Log broadcast and all responses
+		log_message('broadcast', requester, f"Broadcast to {len(exec_res_list)} agents")
+		for response in exec_res_list:
+			log_message('broadcast_response', response['agent'], response['response'][:200])
+
 		# Log the broadcast action
 		shared["conversation_history"].append({
 			'agent': requester,
@@ -268,6 +364,9 @@ class RouteToColleagueNode(AsyncNode):
 		agent = shared["current_agent"]
 		debug(f'[{agent.upper()}] Delegating to {colleague}: {message}')
 
+		# Log delegation
+		log_message('delegation', agent, f"To {colleague}: {message}")
+
 		shared["conversation_history"].append({
 			'agent': agent,
 			'action': f'delegate_to_{colleague}',
@@ -293,6 +392,9 @@ class FinalAnswerNode(AsyncNode):
 		shared["final_answer"] = exec_res
 		agent = shared["current_agent"]
 
+		# Log final answer
+		log_message('final_answer', agent, exec_res)
+
 		shared["conversation_history"].append({
 			'agent': agent,
 			'action': 'answer',
@@ -304,7 +406,7 @@ class FinalAnswerNode(AsyncNode):
 		return "done"
 
 class DisplayResult(AsyncNode):
-	"""Display the final result"""
+	"""Display the final result and loop back for next interaction"""
 	async def exec_async(self, prep_res):
 		return None
 
@@ -319,10 +421,27 @@ class DisplayResult(AsyncNode):
 		for i, step in enumerate(shared['conversation_history'], 1):
 			print(f"{i}. [{step['agent'].upper()}] {step['action']}: {step['summary']}")
 		print("="*60)
+
+		# Log interaction completion
+		log_message('interaction_complete', 'system', f"Completed in {len(shared['conversation_history'])} steps")
+
+		# Loop back to get next user input
+		return "continue"
+
+class QuitNode(AsyncNode):
+	"""Handle graceful exit"""
+	async def exec_async(self, prep_res):
+		print("\n" + "="*60)
+		print("Session ended. All conversations saved to conversation_log.jsonl")
+		print("="*60)
+		return None
+
+	async def post_async(self, shared, prep_res, exec_res):
 		return "default"
 
 # Create nodes
 get_input = GetUserInput()
+quit_node = QuitNode()
 
 # Agent decision nodes (one per agent)
 cto_decide = AgentDecisionNode('cto')
@@ -341,6 +460,7 @@ display = DisplayResult()
 # Wire up the flow
 # Start with user input
 get_input >> sec_decide
+get_input - "quit" >> quit_node
 
 # Secretary decisions
 sec_decide - "search" >> search_web
@@ -393,8 +513,9 @@ route - "lead_developer" >> dev_decide
 route - "qa_lead" >> qa_decide
 route - "secretary" >> sec_decide
 
-# Final answer leads to display
+# Final answer leads to display, then loops back to input
 final_answer - "done" >> display
+display - "continue" >> get_input
 
 # Create and run async flow
 async def main():
